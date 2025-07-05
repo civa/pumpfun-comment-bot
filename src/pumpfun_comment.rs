@@ -5,7 +5,7 @@ use std::{
 };
 
 use rand::seq::IndexedRandom;
-use reqwest::{Client, StatusCode, Url, cookie::CookieStore, header::HeaderValue};
+use reqwest::{Client, Proxy, StatusCode, Url, cookie::CookieStore, header::HeaderValue};
 use serde_json::json;
 use solana_sdk::{loader_upgradeable_instruction, signature::Keypair, signer::Signer};
 
@@ -43,8 +43,13 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
 
     for wallet in wallets {
         let jar = Arc::new(reqwest::cookie::Jar::default());
+        let username = std::env::var("PROXY_USER").unwrap();
+        let password = std::env::var("PROXY_PASS").unwrap();
+        let proxy_url = format!("http://user-{}:{}@dc.oxylabs.io:8000", username, password);
+        let proxy = Proxy::http(proxy_url).unwrap();
         let client = reqwest::Client::builder()
             .cookie_provider(jar.clone())
+            .proxy(proxy)
             .build()
             .unwrap();
         let login = login(wallet.clone(), &client).await?;
@@ -54,6 +59,7 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
         } else {
             error!("{} failed to authenticate to pump.fun", &wallet.address);
         }
+        jar.add_cookie_str("x-aws-waf-token=f62cdc38-7abd-4220-b902-8b7c3afeb68b:IAoAZO9GAnstAAAA:diUjPoCVcgOlHzVo3xeRUcj5vmJfQLgUG62G7r0ELBDMqyUfFEPc5oIOIJVBesh0UbQWsURVOzwb38x5YFdXEq4Kax4Rprh73Y5fbd2Dqs0wecH20ATR3JxiZFf/7bLkuCxPOrwa4XjOpoDZ5RHVl/NOd9LKGFx9gWQI0EZiqtfRnR9XGLMveV57MJzvTAkrbGRY/Ugfn8igefz4Mys5nwo11c7qimFOllqnV85ks3C+0xwpTJ42mOBK", &Url::parse("https://pump.fun").unwrap()); // todo
     }
 
     info!("Authentication complete");
@@ -66,9 +72,7 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
         }
     };
     let comments_vec: Vec<String> = serde_json::from_str(&comments)?;
-
     info!("Fetched {} comments from comments.json", comments_vec.len());
-
     info!(
         "Starting comments with {} authenticated clients",
         hashmap_client_storage.len()
@@ -103,7 +107,10 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
                     error!("error code : {}", x);
                 }
             }
-            Err(_) => todo!(),
+            Err(x) => {
+                println!("{}", x);
+                continue;
+            }
         }
     }
 
@@ -112,21 +119,34 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
 }
 
 async fn comment(client: &Client, mint: &str, text: &str) -> Result<StatusCode, PumpCommentErr> {
-    let endpoint = "https://frontend-api-v3.pump.fun/replies";
+    let endpoint = "https://frontend-api-v3.pump.fun/replies".to_owned();
     let json = json!({
         "mint": mint,
         "text": text
     });
-    let comment_res = client
+    let comment_res =  match client
         .post(endpoint)
+        // .header("x-aws-waf-token", "")
+        .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
         .header("content-type", "application/json")
         //demostration purpose only 😁
         .header("origin", "https://pump.fun")
         .json(&json)
         .send()
-        .await?;
+        .await {
+            Ok(x) => x,
+            Err(x) => {
+                println!("{:?}", x);
+                return Err(PumpCommentErr::ReqwestError(x))
+                
+            },
+        };
+
+    
 
     let status = comment_res.status();
+    let text = comment_res.text().await;
+    println!("{:?}", text);
     Ok(status)
 }
 async fn get_profile(client: &Client) -> Result<StatusCode, PumpCommentErr> {

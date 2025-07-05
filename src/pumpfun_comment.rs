@@ -18,25 +18,41 @@ pub enum PumpCommentErr {
     ParseUrlError(#[from] url::ParseError),
 }
 
-pub async fn run_comments() -> Result<(), PumpCommentErr> {
+#[derive(clap::Args)]
+pub struct RunCommentsArgs {}
+pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
     let mut hashmap_client_storage = HashMap::new();
+
+    let loaded_wallets = LocalSolanaWallet::load_wallets().unwrap();
+    //lets handle the auth
     // let prepare the cookie jar
-    let jar = Arc::new(reqwest::cookie::Jar::default());
-    let client = reqwest::Client::builder()
-        .cookie_provider(jar.clone())
-        .build()
-        .unwrap();
-    let random = LocalSolanaWallet::load_wallets()
-        .unwrap()
-        .first()
-        .cloned()
-        .unwrap();
-    hashmap_client_storage.insert(random.address.clone(), client.clone());
-    let login = login(random, &client).await?;
-    get_profile(&client).await;
+
+    for wallet in loaded_wallets {
+        let jar = Arc::new(reqwest::cookie::Jar::default());
+        let client = reqwest::Client::builder()
+            .cookie_provider(jar.clone())
+            .build()
+            .unwrap();
+        let login = login(wallet.clone(), &client).await?;
+        if login.is_success() {
+            hashmap_client_storage.insert(wallet.address.clone(), client.clone());
+        } else {
+        }
+    }
+
+    // get_profile(&client).await;
     Ok(())
 }
 
+async fn comment(client: &Client, mint: &str, text: &str) -> Result<StatusCode, PumpCommentErr> {
+    let endpoint = "https://frontend-api-v3.pump.fun/replies";
+    let json = json!({
+        "mint": mint,
+        "text": text
+    });
+    let comment_res = client.post(endpoint).json(&json).send().await?;
+    Ok(comment_res.status())
+}
 async fn get_profile(client: &Client) -> Result<StatusCode, PumpCommentErr> {
     let profile_endpoint = "https://frontend-api-v3.pump.fun/auth/my-profile";
     let res = client.get(profile_endpoint).send().await?;

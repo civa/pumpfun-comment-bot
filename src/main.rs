@@ -1,9 +1,12 @@
+#[macro_use]
+extern crate tracing;
 use clap::Parser;
 use generate_wallet::GenerateWalletOpts;
 use pumpfun_comment::RunCommentsArgs;
 use std::env::Args;
 pub mod generate_wallet;
 pub mod pumpfun_comment;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(clap::Parser)]
 enum Opts {
@@ -12,6 +15,17 @@ enum Opts {
 }
 #[tokio::main]
 async fn main() {
+    let filter = EnvFilter::builder()
+        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+        .from_env()
+        .unwrap();
+    tracing_subscriber::fmt()
+        .with_file(true)
+        .with_line_number(true)
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .init();
     let opts = Opts::parse();
     match opts {
         Opts::GenerateWallets(generate_wallet_opts) => {

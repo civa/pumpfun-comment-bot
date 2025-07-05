@@ -1,15 +1,17 @@
 use std::{
-    collections::{HashMap, hash_map},
+    collections::{hash_map, HashMap},
     fs,
-    sync::Arc,
+    sync::Arc, thread, time::{Duration, Instant},
 };
 
+use futures::StreamExt;
 use rand::seq::IndexedRandom;
-use reqwest::{Client, Proxy, StatusCode, Url, cookie::CookieStore, header::HeaderValue};
+use reqwest::{cookie::{CookieStore, Jar}, header::HeaderValue, Client, Proxy, StatusCode, Url};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_sdk::{loader_upgradeable_instruction, signature::Keypair, signer::Signer};
-
-use crate::generate_wallet::LocalSolanaWallet;
+use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+use crate::generate_wallet::{GenerateWalletOpts, LocalSolanaWallet};
 use base58::ToBase58;
 
 #[derive(thiserror::Error, Debug)]
@@ -24,14 +26,100 @@ pub enum PumpCommentErr {
     ErrorLoadingComments,
     #[error("error deserializing")]
     DeserializationErr(#[from] serde_json::Error),
+    #[error("")]
+    ErrorLoadingWebsocket,
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct RunCommentsArgs {
+    #[arg(long)]
     num: Option<usize>,
+    #[arg(long, short)]
+    random: bool,
+    #[arg(short)]
+    sleep: Option<u64>,
+    #[arg(long, short)]
+    mint: String
 }
+#[derive(clap::Args, Clone)]
+pub struct RunCommentsOnNewArgs {
+    #[arg(long, short)]
+    random: bool,
+    #[arg(short)]
+    sleep: Option<u64>,
+}
+
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct SocketEvent {
+    params: Params
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct Params {
+    pair: Pair
+}
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct Pair {
+    #[serde(alias = "baseToken")]
+    base_token: Token 
+}
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct Token {
+    account : String,
+}
+
+pub async fn run_comments_on_new(opts: RunCommentsOnNewArgs) -> Result<(), PumpCommentErr> {
+    let wss_endpoint = "wss://bot-api.zarp.ai/stream-new-pairs".into_client_request().unwrap();
+    info!("Entering stream");
+    let (ws_stream, _) = connect_async(wss_endpoint).await.unwrap();
+    info!("splitting socket");
+    let (_w, mut r) =ws_stream.split();
+    info!("Listening to messages");
+
+    let mut tasks = vec![];
+    let mut last_comment = Instant::now() - Duration::from_secs(opts.sleep.unwrap_or(60));
+    while let Some(Ok((msg))) = r.next().await {
+        match msg {
+            tokio_tungstenite::tungstenite::Message::Binary(bytes) =>{
+                if last_comment.elapsed() < Duration::from_secs(opts.sleep.unwrap_or(60)) {
+                    continue;
+                }
+                info!("Deserializing bytes");
+                let deserialized =match  serde_json::from_slice::<SocketEvent>(&bytes) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        println!("{}", e);
+                        continue;
+                    }
+                };
+
+                let pair_to_comment = deserialized.params.pair.base_token.account;
+                println!("Checking if to comment on {}", pair_to_comment);
+
+                let child_opts = RunCommentsArgs { num: Some(1), random: false, sleep: Some(0), mint: pair_to_comment };
+                let handle = tokio::spawn(run_comments(child_opts));
+                tasks.push(handle);
+                last_comment = Instant::now();
+            },
+            _ => todo!()
+        }
+        
+    }
+
+    
+
+    todo!()
+}
+
 pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
     let mut hashmap_client_storage = HashMap::new();
+    let wallets = match opts.random {
+        true => {
+            LocalSolanaWallet::generate_wallets_no_save(opts.num.unwrap_or(300) as usize)
+        },
+        false => {
+            
     let loaded_wallets =
         LocalSolanaWallet::load_wallets().map_err(|_x| PumpCommentErr::ErrorLoadingWallets)?;
     let loaded_wallets_len = loaded_wallets.len();
@@ -40,7 +128,9 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
         .into_iter()
         .take(opts.num.unwrap_or(loaded_wallets_len))
         .collect();
-
+    wallets
+        }
+    };
     for wallet in wallets {
         let jar = Arc::new(reqwest::cookie::Jar::default());
         let username = std::env::var("PROXY_USER").unwrap();
@@ -59,9 +149,8 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
         } else {
             error!("{} failed to authenticate to pump.fun", &wallet.address);
         }
-        jar.add_cookie_str("x-aws-waf-token=f62cdc38-7abd-4220-b902-8b7c3afeb68b:IAoAZO9GAnstAAAA:diUjPoCVcgOlHzVo3xeRUcj5vmJfQLgUG62G7r0ELBDMqyUfFEPc5oIOIJVBesh0UbQWsURVOzwb38x5YFdXEq4Kax4Rprh73Y5fbd2Dqs0wecH20ATR3JxiZFf/7bLkuCxPOrwa4XjOpoDZ5RHVl/NOd9LKGFx9gWQI0EZiqtfRnR9XGLMveV57MJzvTAkrbGRY/Ugfn8igefz4Mys5nwo11c7qimFOllqnV85ks3C+0xwpTJ42mOBK", &Url::parse("https://pump.fun").unwrap()); // todo
+        add_extra_cookies(jar).await;
     }
-
     info!("Authentication complete");
     let comments = fs::read_to_string("comments.json");
     let comments = match comments {
@@ -96,7 +185,7 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
             continue;
         }
 
-        let mint = std::env::var("MINT").unwrap();
+        let mint = opts.mint.clone();
         let res = comment(&client, &mint, &random_comment).await;
         match res {
             Ok(x) => {
@@ -112,12 +201,17 @@ pub async fn run_comments(opts: RunCommentsArgs) -> Result<(), PumpCommentErr> {
                 continue;
             }
         }
+
+        thread::sleep(Duration::from_secs(opts.sleep.unwrap_or(30)));
     }
 
     // get_profile(&client).await;
     Ok(())
 }
 
+async fn add_extra_cookies(jar: Arc<Jar>) {
+        jar.add_cookie_str("x-aws-waf-token=f62cdc38-7abd-4220-b902-8b7c3afeb68b:IAoAZO9GAnstAAAA:diUjPoCVcgOlHzVo3xeRUcj5vmJfQLgUG62G7r0ELBDMqyUfFEPc5oIOIJVBesh0UbQWsURVOzwb38x5YFdXEq4Kax4Rprh73Y5fbd2Dqs0wecH20ATR3JxiZFf/7bLkuCxPOrwa4XjOpoDZ5RHVl/NOd9LKGFx9gWQI0EZiqtfRnR9XGLMveV57MJzvTAkrbGRY/Ugfn8igefz4Mys5nwo11c7qimFOllqnV85ks3C+0xwpTJ42mOBK", &Url::parse("https://pump.fun").unwrap()); // todo
+}
 async fn comment(client: &Client, mint: &str, text: &str) -> Result<StatusCode, PumpCommentErr> {
     let endpoint = "https://frontend-api-v3.pump.fun/replies".to_owned();
     let json = json!({

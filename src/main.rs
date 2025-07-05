@@ -2,7 +2,7 @@
 extern crate tracing;
 use clap::Parser;
 use generate_wallet::GenerateWalletOpts;
-use pumpfun_comment::RunCommentsArgs;
+use pumpfun_comment::{RunCommentsArgs, RunCommentsOnNewArgs};
 use std::env::Args;
 pub mod generate_wallet;
 pub mod pumpfun_comment;
@@ -12,6 +12,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 enum Opts {
     GenerateWallets(GenerateWalletOpts),
     GenerateComments(RunCommentsArgs),
+    GenerateCommentsOnNew(RunCommentsOnNewArgs),
 }
 #[tokio::main]
 async fn main() {
@@ -32,5 +33,8 @@ async fn main() {
             generate_wallet::LocalSolanaWallet::generate_wallets(generate_wallet_opts)
         }
         Opts::GenerateComments(args) => pumpfun_comment::run_comments(args).await.unwrap(),
+        Opts::GenerateCommentsOnNew(args) => {
+            pumpfun_comment::run_comments_on_new(args).await.unwrap()
+        }
     }
 }

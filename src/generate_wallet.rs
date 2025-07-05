@@ -26,8 +26,12 @@ pub enum LocalSolanaWalletError {
 }
 impl LocalSolanaWallet {
     pub fn generate_wallets(opts: GenerateWalletOpts) {
-        let mut wallets = Vec::with_capacity(opts.num as usize);
-        for _i in 0..opts.num {
+        let wallets = Self::generate_wallets_no_save(opts.num as usize);
+        Self::save_wallets(&wallets).unwrap() // #fix
+    }
+    pub fn generate_wallets_no_save(num: usize) -> Vec<Self> {
+        let mut wallets = Vec::with_capacity(num);
+        for _i in 0..num {
             let keypair = Keypair::new();
             let wallet = LocalSolanaWallet {
                 address: keypair.pubkey().to_string(),
@@ -36,7 +40,7 @@ impl LocalSolanaWallet {
             wallets.push(wallet);
         }
 
-        Self::save_wallets(&wallets).unwrap() // #fix
+        wallets
     }
 
     pub fn save_wallets(wallets: &Vec<LocalSolanaWallet>) -> Result<(), LocalSolanaWalletError> {
